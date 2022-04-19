@@ -1,0 +1,111 @@
+# This R script is based on  indradenbakker's R script
+# I customized eval_metric ndcg5 so that it is much easier to monitor ndcg value.
+
+# load libraries
+library(xgboost)
+library(readr)
+library(stringr)
+library(caret)
+library(car)
+
+set.seed(1234)
+setwd("C:/Users/smrit/Downloads/School/MSBA 4.0/Sem 2/ML2/R/New folder")
+
+#######################################################################
+#                   LOADING THE DATA
+#######################################################################
+
+train = read_csv("train_users_2.csv",show_col_types = FALSE)
+test = read_csv("test_users.csv",show_col_types = FALSE)
+countries = train['country_destination']
+
+
+#######################################################################
+#                  CLEANING UP THE DATA
+#######################################################################
+
+#Overriding matches to "country_destination" within train data
+train = train[-grep('country_destination', colnames(train))]
+
+#Overriding matches to "date_first_booking" within train and test data
+train = train[-grep('date_first_booking', colnames(train))]
+test = test[-grep('date_first_booking', colnames(test))]
+
+# Combine train and test data
+combinedata <- rbind(train, test)
+
+# Splitting the date column into a fixed number of pieces
+date = as.data.frame(str_split_fixed(combinedata$date_account_created, pattern = '-', n=3))
+# Adding the date pieces to combined dataset 
+combinedata['year'] = date[,1]
+combinedata['month'] = date[,2]
+combinedata['day'] = date[,3]
+# Removing the original date column
+combinedata = combinedata[-grep('date_account_created', colnames(combinedata))]
+
+# Doing the same formatting to timestamp_first_active 
+combinedata[,'timestamp_year'] = substring(as.character(combinedata[,'timestamp_first_active']), 1, 4)
+combinedata['timestamp_month'] = substring(as.character(combinedata['timestamp_first_active']), 5, 6)
+combinedata['timestamp_day'] = substring(as.character(combinedata['timestamp_first_active']), 7, 8)
+combinedata = combinedata[,-c(which(colnames(combinedata) %in% c('timestamp_first_active')))]
+
+#Cleaning up the missing values
+combinedata[is.na(combinedata)] <- -1
+
+#######################################################################
+#                     MODEL
+#######################################################################
+
+# creating a new binary feature for each category and assigning a value of 1 
+# to the feature of each sample that corresponds to its original category.
+ohencode <- c('gender', 'signup_method', 'signup_flow', 'language', 'affiliate_channel', 'affiliate_provider', 'first_affiliate_tracked', 'signup_app', 'first_device_type', 'first_browser')
+dummies <- dummyVars(~ gender + signup_method + signup_flow + language + affiliate_channel + affiliate_provider + first_affiliate_tracked + signup_app + first_device_type + first_browser, data = combinedata)
+# Binary result of the dataset as corresponds to combinedata
+combinedata_ohencode <- as.data.frame(predict(dummies, newdata = combinedata))
+
+# Removing the 10 columns selected in ohencode
+final <- cbind(combinedata[,-c(which(colnames(combinedata) %in% ohencode))],combinedata_ohencode)
+
+# Splitting train and test dataset
+xtrain <- final[final$id %in% train$id,]
+xtest <- final[final$id %in% test$id,]
+
+#######################################################################
+#                    XGBOOST
+#######################################################################
+
+# Train xgboost: XGB consists of a number of hyper-parameters that can be tuned - a primary advantage over gradient boosting machines. XGBoost has an in-built capability to handle missing values
+xgboost <- xgboost(data= data.matrix(xtrain[,-1]), 
+               label=recode(countries$country_destination,"'NDF'=0; 'US'=1; 'other'=2; 'FR'=3; 'CA'=4; 'GB'=5; 'ES'=6; 'IT'=7; 'PT'=8; 'NL'=9; 'DE'=10; 'AU'=11"), 
+               eta = 0.3, #learning rate
+               max_depth = 6, #6 is default.  Increasing this value will make the model more complex and more likely to overfit. 
+               nround=45, 
+               subsample = 0.5, #Setting it to 0.5 means that XGBoost would randomly sample half of the training data prior to growing trees.
+               colsample_bytree = 0.6, # is the subsample ratio of columns when constructing each tree. Subsampling occurs once for every tree constructed.
+               set.seed = 123, 
+               eval_metric = "merror", #Multiclass classification error rate.
+               objective = "multi:softprob", #Multi-class classification problems shoud have multi:softprob
+               num_class = 12, #comes with multi:softprob
+               nthread = 8 #3
+)
+
+# Predicting values in test set
+y_pred <- predict(xgboost, data.matrix(xtest[,-1]))
+
+# Highest probable top 5 classes
+predictions <- as.data.frame(matrix(y_pred, nrow=12))
+rownames(predictions) <- c('NDF','US','other','FR','CA','GB','ES','IT','PT','NL','DE','AU')
+predictions_top5 <- as.vector(apply(predictions, 2, function(x) names(sort(x)[12:8])))
+
+# Creating submission 
+idx = xtest$id
+id_mtx <-  matrix(idx, 1)[rep(1,5), ]
+ids <- c(id_mtx)
+
+countryprediction <- NULL
+countryprediction$id <- ids
+countryprediction$country <- predictions_top5
+
+# Final prediction of the user associated to the country they will book AirBnB in
+countryprediction <- as.data.frame(countryprediction)
+write.csv(countryprediction, "tp02.csv", quote=FALSE, row.names = FALSE)
