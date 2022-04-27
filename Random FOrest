@@ -1,0 +1,117 @@
+rm(list = ls())
+
+# 1. load libraries
+library(lubridate)	# Library for date functions
+library(dplyr)			# For data selection and filter
+library(caret)			# For data partition
+library(ggplot2)    # For data exploration
+library(randomForest)
+library(readr)
+library(e1071)
+#library(C50)			  # Library for decision tree
+
+options(scipen = 999)		# Do not show numbers as exponentials
+
+###### Set data path, load data and examine it
+train <- read.csv("train_users_2.csv")
+test <- read.csv("test_users.csv")
+age_gender <- read.csv("age_gender_bkts.csv", stringsAsFactors = TRUE)
+
+
+##### Examining the test and training data sets
+head(train)
+str(train)
+head(test)
+str(test)
+summary(train)
+summary(test)
+
+##### Examine affiliate_provider
+table(train$affiliate_provider)   # Freq of levels
+##### The following plot shows the highly imbalanced nature of country visits
+ggplot(data = age_gender)+ geom_boxplot(aes(x=country_destination,y=population_in_thousands)) # Country vs population
+
+##### Data Processing #####
+
+#Count number of NA values (218,598)
+sum(is.na(train))
+# Shows number of NA's in each feature (date_first_booking has a lot, with 124,543, so we are going to get rid of it.)
+apply(apply(train,2,is.na),2,sum)
+
+
+#Create train and test index 
+train$index <- 1:nrow(train)# Create an arbitrary index for separation
+test$index <- 300000:300000 + nrow(test)
+
+#Factor levels of 'signup_method' are different in train and test data
+#We need to bind the two together, process the data and then separate
+#From train, remove class variable 'country_destination'
+#but save it in labels. This will also help us
+#in binding train and test data.
+
+labels <- train[,c(1,16)]			# Extract column in labels
+train$country_destination <- NULL	# Next remove 'country_destination' col
+dataFrame_combined <- rbind(train, test)		# Finally row-bind, train and test
+dataFrame_combined$date_first_booking <- NULL		# Remove data_first_booking col because it does not exist in the test data and it has a bunch of NA's in the train data. 
+
+##### Convert 'date_account_created' to date and then extract components year, month, day and day of week #####
+dataFrame_combined$date_account_created <-ymd(dataFrame_combined$date_account_created)
+dataFrame_combined$dac_year <-year(dataFrame_combined$date_account_created)
+dataFrame_combined$dac_day <-day(dataFrame_combined$date_account_created)
+dataFrame_combined$dac_month <-month(dataFrame_combined$date_account_created)
+dataFrame_combined$dac_wday <-wday(dataFrame_combined$date_account_created)
+dataFrame_combined$date_account_created <-NULL 
+
+##### Do the same thing for the variable timestamp_first_active
+dataFrame_combined$timestamp_first_active <-ymd_hms(dataFrame_combined$timestamp_first_active)
+dataFrame_combined$tfa_year <-year(dataFrame_combined$timestamp_first_active)
+dataFrame_combined$tfa_month <-month(dataFrame_combined$timestamp_first_active)
+dataFrame_combined$tfa_day <-day(dataFrame_combined$timestamp_first_active)
+dataFrame_combined$tfa_wday <-wday(dataFrame_combined$timestamp_first_active)
+dataFrame_combined$timestamp_first_active <-NULL
+
+
+
+##### Split the cleaned data set 
+# Split back train and test data and merge in X the class variable: labels
+airBnB_finalDataFrame <- dataFrame_combined %>% filter (index < 300000) %>% mutate(index = NULL) 
+airBnB_finalDataFrame <- merge(airBnB_finalDataFrame,labels,by='id')
+airBnB_finalDataFrame <- na.omit(airBnB_finalDataFrame)
+
+
+#Create new test and train sets 
+trainindex <- sample(1:nrow(airBnB_finalDataFrame), size = .8*nrow(airBnB_finalDataFrame))
+train_final <- airBnB_finalDataFrame[trainindex,]
+test_final <- airBnB_finalDataFrame[-trainindex,]
+
+# 15. Build decision tree model. It takes a little bit of time. 
+set.seed(1)
+rf.AirBnB <- randomForest(as.factor(country_destination)~., data = airBnB_finalDataFrame, subset = trainindex, importance = TRUE)
+
+rf.AirBnB_predicted <- predict(rf.AirBnB, newdata = airBnB_finalDataFrame[-trainindex,], type = 'class' )
+confusion <- table(rf.AirBnB_predicted, test_final$country_destination)
+confusion
+
+((13047)/24686)#Accuracy Rate for predicting country booking location
+
+importance(rf.AirBnB)
+
+##### Classifcation Tree - Pruning ##### 
+library(tree)
+tree.airBnb <- tree(as.factor(country_destination) ~., data = airBnB_finalDataFrame)
+summary(tree.airBnb)
+
+set.seed(1)
+
+trainindex <- sample(1:nrow(airBnB_finalDataFrame), size = .8*nrow(airBnB_finalDataFrame))
+train_final <- airBnB_finalDataFrame[trainindex,]
+test_final <- airBnB_finalDataFrame[-trainindex,]
+
+country_destination.test <- airBnB_finalDataFrame$country_destination[-trainindex]
+tree.airBnb <- tree(as.factor(country_destination)~., airBnB_finalDataFrame, subset = trainindex) 
+tree.airBnb_pred <- predict(tree.airBnb, test_final, type = 'class')
+table(tree.airBnb_pred, country_destination.test)
+
+((11118/24686))#Accuracy rate for classification decision tree
+
+##### Boosting ##### 
